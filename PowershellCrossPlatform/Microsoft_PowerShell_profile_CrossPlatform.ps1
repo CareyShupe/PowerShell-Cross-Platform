@@ -136,8 +136,25 @@ function Update-PowerShell
         return $false
     }
 
-    # Check network connectivity
-    if (-not (Test-Connection 'github.com' -Count 1 -Quiet -TimeoutSeconds 2 -ErrorAction SilentlyContinue))
+    # Check network connectivity (TCP-based; ICMP ping is unreliable/unprivileged on Linux)
+    $hasConnection = if ($IsWindows)
+    {
+        Test-NetConnection -ComputerName 'github.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    }
+    else
+    {
+        try
+        {
+            Invoke-WebRequest -Uri 'https://github.com' -Method Head -TimeoutSec 2 -ErrorAction Stop | Out-Null
+            $true
+        }
+        catch
+        {
+            $false
+        }
+    }
+
+    if (-not $hasConnection)
     {
         Write-Error "No internet connection to github.com"
         return $false
@@ -267,30 +284,39 @@ if ($IsWindows)
 $tempPath = [System.IO.Path]::GetTempPath()
 $checkFile = Join-Path -Path $tempPath -ChildPath 'ps_update_check.txt'
 
-Start-ThreadJob `
-    -InitializationScript $initScript `
-    -ArgumentList $checkFile, $Script:EnableAutoPackageUpdate `
-    -ScriptBlock {
-    param($CheckFile, $AutoPackageUpdate)
+if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+{
+    # Inject the profile's own function definitions into the job's runspace,
+    # since a ThreadJob does NOT inherit functions defined in the parent session.
+    $initScript = [scriptblock]::Create(@"
+function Update-Modules { $(${function:Update-Modules}) }
+function Update-PowerShell { $(${function:Update-PowerShell}) }
+"@)
 
-    try
-    {
-        $Script:EnableAutoPackageUpdate = $AutoPackageUpdate
+    Start-ThreadJob `
+        -InitializationScript $initScript `
+        -ArgumentList $checkFile, $Script:EnableAutoPackageUpdate `
+        -ScriptBlock {
+        param($CheckFile, $AutoPackageUpdate)
 
-        Update-Modules
-        Update-PowerShell
-
-        # Only reset the gate timer if maintenance tasks cleanly execute without breaking constraints
-        if ($modStatus -and $pwshStatus)
+        try
         {
-            (Get-Date).ToString('o') | Set-Content -Path $CheckFile -Encoding UTF8
-        }
-    }
-    catch
-    {
-    }
-} | Out-Null
+            $Script:EnableAutoPackageUpdate = $AutoPackageUpdate
 
+            $modStatus = Update-Modules
+            $pwshStatus = Update-PowerShell
+
+            # Only reset the gate timer if maintenance tasks cleanly execute without breaking constraints
+            if ($modStatus -and $pwshStatus)
+            {
+                (Get-Date).ToString('o') | Set-Content -Path $CheckFile -Encoding UTF8
+            }
+        }
+        catch
+        {
+        }
+    } | Out-Null
+}
 else
 {
     try
@@ -305,7 +331,7 @@ else
     catch
     {
     }
-} | Out-Null
+}
 
 # --- Prompt Initialization ---
 if (Get-Command oh-my-posh -ErrorAction SilentlyContinue)
@@ -361,24 +387,27 @@ $PSReadLineOptions = @{
         param($line)
         if ([string]::IsNullOrWhiteSpace($line) -or $line -match '^\s*#')
         {
-            return
+            return [Microsoft.PowerShell.AddToHistoryOption]::SkipAdding
         }
-        $line
+        return [Microsoft.PowerShell.AddToHistoryOption]::MemoryAndFile
     }
 }
 
-if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue)
+try
 {
-    $psrlModule = Get-Module PSReadLine
-    if ($psrlModule -and $psrlModule.Version -ge [Version]'2.2.0')
+    if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue)
     {
-        Set-PSReadLineOption @PSReadLineOptions
-    }
-    else
-    {
-        $reducedOptions = $PSReadLineOptions.Clone()
-        $reducedOptions.Remove('PredictionViewStyle')
-        Set-PSReadLineOption @reducedOptions
+        $psrlModule = Get-Module PSReadLine
+        if ($psrlModule -and $psrlModule.Version -ge [Version]'2.2.0')
+        {
+            Set-PSReadLineOption @PSReadLineOptions
+        }
+        else
+        {
+            $reducedOptions = $PSReadLineOptions.Clone()
+            $reducedOptions.Remove('PredictionViewStyle')
+            Set-PSReadLineOption @reducedOptions
+        }
     }
 }
 catch
@@ -451,15 +480,13 @@ if ($IsWindows -and (Get-Command Out-GridView -ErrorAction SilentlyContinue))
 Set-PSReadLineKeyHandler -Key Tab -BriefDescription "GitAutoCorrection" -LongDescription "Auto-correct git subcommands" -ScriptBlock {
     param($key, $arg)
 
-    $buffer = $null
     $cursor = 0
     $ast = $null
     $tokens = @()
     $parseErrors = @()
 
     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
-        [ref]$buffer, [ref]$cursor,
-        [ref]$ast, [ref]$tokens, [ref]$parseErrors
+        [ref]$ast, [ref]$tokens, [ref]$parseErrors, [ref]$cursor
     )
 
     $CommandAst = $ast.Find({
@@ -470,20 +497,20 @@ Set-PSReadLineKeyHandler -Key Tab -BriefDescription "GitAutoCorrection" -LongDes
 
     if (-not $CommandAst)
     {
-        [Microsoft.PowerShell.PSConsoleReadLine]::Complete()
+        [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
         return
     }
 
     $CommandName = $CommandAst.CommandElements[0].Value
     if ($CommandName -ne 'git')
     {
-        [Microsoft.PowerShell.PSConsoleReadLine]::Complete()
+        [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
         return
     }
 
     if ($CommandAst.CommandElements.Count -lt 2)
     {
-        [Microsoft.PowerShell.PSConsoleReadLine]::Complete()
+        [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
         return
     }
 
@@ -496,7 +523,7 @@ Set-PSReadLineKeyHandler -Key Tab -BriefDescription "GitAutoCorrection" -LongDes
         }
         default
         {
-            [Microsoft.PowerShell.PSConsoleReadLine]::Complete()
+            [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
         }
     }
 }
@@ -521,15 +548,13 @@ Set-PSReadLineKeyHandler -Key Alt+a `
     -ScriptBlock {
     param($key, $arg)
 
-    $line = $null
     $cursor = 0
     $ast = $null
     $tokens = @()
     $parseErrors = @()
 
     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
-        [ref]$line, [ref]$cursor,
-        [ref]$ast, [ref]$tokens, [ref]$parseErrors
+        [ref]$ast, [ref]$tokens, [ref]$parseErrors, [ref]$cursor
     )
 
     $asts = $ast.FindAll({
