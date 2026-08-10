@@ -36,11 +36,15 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'UTF-8'
 $Script:EnableAutoPackageUpdate = $false
 
 # --- To check if or make PSGallery trusted ---
-$repo = Get-PSResourceRepository -Name PSGallery -ErrorAction SilentlyContinue
-
-if ($repo -and -not $repo.Trusted)
+if ((Get-Command Get-PSResourceRepository -ErrorAction SilentlyContinue) -and
+    (Get-Command Set-PSResourceRepository -ErrorAction SilentlyContinue))
 {
-    Set-PSResourceRepository -Name PSGallery -Trusted
+    $repo = Get-PSResourceRepository -Name PSGallery -ErrorAction SilentlyContinue
+
+    if ($repo -and -not $repo.Trusted)
+    {
+        Set-PSResourceRepository -Name PSGallery -Trusted
+    }
 }
 
 ## --- Admin Detection ---
@@ -82,6 +86,13 @@ if ($IsWindows)
 # --- Core Functions ---
 function Update-Modules
 {
+    if (-not (Get-Command Find-Module -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Install-Module -ErrorAction SilentlyContinue))
+    {
+        Write-Verbose 'PowerShellGet is not available; skipping module updates.'
+        return $false
+    }
+
     $modules = @(
         'PSScriptAnalyzer'
         'Pester'
@@ -92,7 +103,15 @@ function Update-Modules
         'PSReadLine'
     )
 
-    $latestModules = Find-Module -Name $modules -ErrorAction SilentlyContinue
+    try
+    {
+        $latestModules = Find-Module -Name $modules -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Verbose "Failed checking module updates: $_"
+        return $false
+    }
 
     foreach ($module in $modules)
     {
@@ -116,9 +135,12 @@ function Update-Modules
             catch
             {
                 Write-Verbose "Failed updating $module : $_"
+                return $false
             }
         }
     }
+
+    return $true
 }
 
 function Update-PowerShell
@@ -193,7 +215,7 @@ function Update-PowerShell
     {
         Write-Host "Auto package updates are disabled (`$Script:EnableAutoPackageUpdate = `$false). Skipping install step." -ForegroundColor Yellow
         Write-Host "Run 'Update-PowerShell -Force' to update anyway, or set `$Script:EnableAutoPackageUpdate = `$true in your profile." -ForegroundColor Yellow
-        return
+        return $true
     }
 
     <#
@@ -283,8 +305,24 @@ if ($IsWindows)
 
 $tempPath = [System.IO.Path]::GetTempPath()
 $checkFile = Join-Path -Path $tempPath -ChildPath 'ps_update_check.txt'
+$maintenanceInterval = [TimeSpan]::FromDays(7)
+$isInteractiveSession = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+$shouldRunMaintenance = $isInteractiveSession
 
-if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+if ($shouldRunMaintenance -and (Test-Path -LiteralPath $checkFile))
+{
+    try
+    {
+        $lastCheck = [datetime]::Parse((Get-Content -LiteralPath $checkFile -Raw), [Globalization.CultureInfo]::InvariantCulture)
+        $shouldRunMaintenance = ((Get-Date) - $lastCheck) -ge $maintenanceInterval
+    }
+    catch
+    {
+        $shouldRunMaintenance = $true
+    }
+}
+
+if ($shouldRunMaintenance -and (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue))
 {
     # Inject the profile's own function definitions into the job's runspace,
     # since a ThreadJob does NOT inherit functions defined in the parent session.
@@ -317,7 +355,7 @@ function Update-PowerShell { $(${function:Update-PowerShell}) }
         }
     } | Out-Null
 }
-else
+elseif ($shouldRunMaintenance)
 {
     try
     {
@@ -423,214 +461,217 @@ catch
 }
 
 # --- PSReadLine Key Handlers ---
-Set-PSReadLineKeyHandler -Key UpArrow -Function HistorySearchBackward
-Set-PSReadLineKeyHandler -Key DownArrow -Function HistorySearchForward
-
-if ($IsWindows -and (Get-Command Out-GridView -ErrorAction SilentlyContinue))
+if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue)
 {
-    Set-PSReadLineKeyHandler -Key F7 -BriefDescription History -LongDescription 'Show command history' -ScriptBlock {
-        [string] $pattern = $null
-        [int]    $cursor = 0
-        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$pattern, [ref]$cursor)
-        if ($pattern)
-        {
-            $pattern = [regex]::Escape($pattern)
-        }
+    Set-PSReadLineKeyHandler -Key UpArrow -Function HistorySearchBackward
+    Set-PSReadLineKeyHandler -Key DownArrow -Function HistorySearchForward
 
-        $history = [System.Collections.ArrayList]@(
-            $last = ''; $lines = ''
-            foreach ($line in [System.IO.File]::ReadLines((Get-PSReadLineOption).HistorySavePath))
+    if ($IsWindows -and (Get-Command Out-GridView -ErrorAction SilentlyContinue))
+    {
+        Set-PSReadLineKeyHandler -Key F7 -BriefDescription History -LongDescription 'Show command history' -ScriptBlock {
+            [string] $pattern = $null
+            [int]    $cursor = 0
+            [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$pattern, [ref]$cursor)
+            if ($pattern)
             {
-                if ($line.EndsWith('`'))
-                {
-                    $line = $line.Substring(0, $line.Length - 1)
-                    $lines = if ($lines)
-                    {
-                        "$lines`n$line"
-                    }
-                    else
-                    {
-                        $line
-                    }
-                    continue
-                }
-                if ($lines)
-                {
-                    $line = "$lines`n$line"; $lines = ''
-                }
-                if (-not $pattern -or $line -match $pattern)
-                {
-                    if ($line -ne $last)
-                    {
-                        $history.Add($line) | Out-Null; $last = $line
-                    }
-                }
+                $pattern = [regex]::Escape($pattern)
             }
+
+            $history = [System.Collections.ArrayList]@(
+                $last = ''; $lines = ''
+                foreach ($line in [System.IO.File]::ReadLines((Get-PSReadLineOption).HistorySavePath))
+                {
+                    if ($line.EndsWith('`'))
+                    {
+                        $line = $line.Substring(0, $line.Length - 1)
+                        $lines = if ($lines)
+                        {
+                            "$lines`n$line"
+                        }
+                        else
+                        {
+                            $line
+                        }
+                        continue
+                    }
+                    if ($lines)
+                    {
+                        $line = "$lines`n$line"; $lines = ''
+                    }
+                    if (-not $pattern -or $line -match $pattern)
+                    {
+                        if ($line -ne $last)
+                        {
+                            $history.Add($line) | Out-Null; $last = $line
+                        }
+                    }
+                }
+            )
+            $selected = $history | Out-GridView -Title History -OutputMode Single
+            if ($null -ne $selected)
+            {
+                [Microsoft.PowerShell.PSConsoleReadLine]::DeleteLine()
+                [Microsoft.PowerShell.PSConsoleReadLine]::Insert($selected)
+            }
+        }
+    }
+
+    # Git command auto-correction
+    Set-PSReadLineKeyHandler -Key Tab -BriefDescription "GitAutoCorrection" -LongDescription "Auto-correct git subcommands" -ScriptBlock {
+        param($key, $arg)
+
+        $cursor = 0
+        $ast = $null
+        $tokens = @()
+        $parseErrors = @()
+
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
+            [ref]$ast, [ref]$tokens, [ref]$parseErrors, [ref]$cursor
         )
-        $selected = $history | Out-GridView -Title History -OutputMode Single
-        if ($null -ne $selected)
-        {
-            [Microsoft.PowerShell.PSConsoleReadLine]::DeleteLine()
-            [Microsoft.PowerShell.PSConsoleReadLine]::Insert($selected)
-        }
-    }
-}
 
-# Git command auto-correction
-Set-PSReadLineKeyHandler -Key Tab -BriefDescription "GitAutoCorrection" -LongDescription "Auto-correct git subcommands" -ScriptBlock {
-    param($key, $arg)
+        $CommandAst = $ast.Find({
+                $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                $args[0].Extent.StartOffset -le $cursor -and
+                $args[0].Extent.EndOffset -gt $cursor
+            }, $true)
 
-    $cursor = 0
-    $ast = $null
-    $tokens = @()
-    $parseErrors = @()
-
-    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
-        [ref]$ast, [ref]$tokens, [ref]$parseErrors, [ref]$cursor
-    )
-
-    $CommandAst = $ast.Find({
-            $args[0] -is [System.Management.Automation.Language.CommandAst] -and
-            $args[0].Extent.StartOffset -le $cursor -and
-            $args[0].Extent.EndOffset -gt $cursor
-        }, $true)
-
-    if (-not $CommandAst)
-    {
-        [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
-        return
-    }
-
-    $CommandName = $CommandAst.CommandElements[0].Value
-    if ($CommandName -ne 'git')
-    {
-        [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
-        return
-    }
-
-    if ($CommandAst.CommandElements.Count -lt 2)
-    {
-        [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
-        return
-    }
-
-    $gitCmd = $CommandAst.CommandElements[1].Extent
-    switch ($gitCmd.Text)
-    {
-        'cmt'
-        {
-            [Microsoft.PowerShell.PSConsoleReadLine]::Replace($gitCmd.StartOffset, $gitCmd.EndOffset - $gitCmd.StartOffset, 'commit')
-        }
-        default
+        if (-not $CommandAst)
         {
             [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
-        }
-    }
-}
-
-Set-PSReadLineKeyHandler -Key RightArrow -BriefDescription ForwardCharAndAcceptNextSuggestionWord -LongDescription "Move cursor right or accept suggestion" -ScriptBlock {
-    param($key, $arg)
-    $line = $null; $cursor = $null
-    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
-    if ($cursor -lt $line.Length)
-    {
-        [Microsoft.PowerShell.PSConsoleReadLine]::ForwardChar($key, $arg)
-    }
-    else
-    {
-        [Microsoft.PowerShell.PSConsoleReadLine]::AcceptNextSuggestionWord($key, $arg)
-    }
-}
-
-Set-PSReadLineKeyHandler -Key Alt+a `
-    -BriefDescription SelectCommandArguments `
-    -LongDescription "Set current selection to next command argument" `
-    -ScriptBlock {
-    param($key, $arg)
-
-    $cursor = 0
-    $ast = $null
-    $tokens = @()
-    $parseErrors = @()
-
-    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
-        [ref]$ast, [ref]$tokens, [ref]$parseErrors, [ref]$cursor
-    )
-
-    $asts = $ast.FindAll({
-            $args[0] -is [System.Management.Automation.Language.ExpressionAst] -and
-            $args[0].Parent -is [System.Management.Automation.Language.CommandAst] -and
-            $args[0].Extent.StartOffset -ne $args[0].Parent.Extent.StartOffset
-        }, $true)
-
-    if ($asts.Count -eq 0)
-    {
-        [Microsoft.PowerShell.PSConsoleReadLine]::Ding(); return
-    }
-    $nextAst = if ($null -ne $arg)
-    {
-        $asts[$arg - 1]
-    }
-    else
-    {
-        $found = $null
-        foreach ($astItem in $asts)
-        {
-            if ($astItem.Extent.StartOffset -ge $cursor)
-            {
-                $found = $astItem; break
-            }
-        }
-        if ($null -eq $found)
-        {
-            $asts[0]
-        }
-        else
-        {
-            $found
-        }
-    }
-
-    $startOffsetAdjustment = 0
-    $endOffsetAdjustment = 0
-    if ($nextAst -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-        $nextAst.StringConstantType -ne [System.Management.Automation.Language.StringConstantType]::BareWord)
-    {
-        $startOffsetAdjustment = 1
-        $endOffsetAdjustment = 2
-    }
-
-    [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition($nextAst.Extent.StartOffset + $startOffsetAdjustment)
-    [Microsoft.PowerShell.PSConsoleReadLine]::SetMark($null, $null)
-    [Microsoft.PowerShell.PSConsoleReadLine]::SelectForwardChar($null, ($nextAst.Extent.EndOffset - $nextAst.Extent.StartOffset) - $endOffsetAdjustment)
-}
-
-Set-PSReadLineKeyHandler -Chord 'Alt+x' -BriefDescription ToUnicodeChar -LongDescription "Transform Unicode point" -ScriptBlock {
-    $buffer = $null; $cursor = 0
-    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref] $buffer, [ref] $cursor)
-    if ($cursor -lt 4)
-    {
-        return
-    }
-    $number = 0
-    if ([int]::TryParse($buffer.Substring($cursor - 4, 4), [System.Globalization.NumberStyles]::AllowHexSpecifier, $null, [ref] $number))
-    {
-        try
-        {
-            $unicode = [char]::ConvertFromUtf32($number)
-        }
-        catch
-        {
             return
         }
 
-        [Microsoft.PowerShell.PSConsoleReadLine]::Delete($cursor - 4, 4)
-        [Microsoft.PowerShell.PSConsoleReadLine]::Insert($unicode)
+        $CommandName = $CommandAst.CommandElements[0].Value
+        if ($CommandName -ne 'git')
+        {
+            [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
+            return
+        }
+
+        if ($CommandAst.CommandElements.Count -lt 2)
+        {
+            [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
+            return
+        }
+
+        $gitCmd = $CommandAst.CommandElements[1].Extent
+        switch ($gitCmd.Text)
+        {
+            'cmt'
+            {
+                [Microsoft.PowerShell.PSConsoleReadLine]::Replace($gitCmd.StartOffset, $gitCmd.EndOffset - $gitCmd.StartOffset, 'commit')
+            }
+            default
+            {
+                [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete()
+            }
+        }
     }
+
+    Set-PSReadLineKeyHandler -Key RightArrow -BriefDescription ForwardCharAndAcceptNextSuggestionWord -LongDescription "Move cursor right or accept suggestion" -ScriptBlock {
+        param($key, $arg)
+        $line = $null; $cursor = $null
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+        if ($cursor -lt $line.Length)
+        {
+            [Microsoft.PowerShell.PSConsoleReadLine]::ForwardChar($key, $arg)
+        }
+        else
+        {
+            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptNextSuggestionWord($key, $arg)
+        }
+    }
+
+    Set-PSReadLineKeyHandler -Key Alt+a `
+        -BriefDescription SelectCommandArguments `
+        -LongDescription "Set current selection to next command argument" `
+        -ScriptBlock {
+        param($key, $arg)
+
+        $cursor = 0
+        $ast = $null
+        $tokens = @()
+        $parseErrors = @()
+
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
+            [ref]$ast, [ref]$tokens, [ref]$parseErrors, [ref]$cursor
+        )
+
+        $asts = $ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.ExpressionAst] -and
+                $args[0].Parent -is [System.Management.Automation.Language.CommandAst] -and
+                $args[0].Extent.StartOffset -ne $args[0].Parent.Extent.StartOffset
+            }, $true)
+
+        if ($asts.Count -eq 0)
+        {
+            [Microsoft.PowerShell.PSConsoleReadLine]::Ding(); return
+        }
+        $nextAst = if ($null -ne $arg)
+        {
+            $asts[$arg - 1]
+        }
+        else
+        {
+            $found = $null
+            foreach ($astItem in $asts)
+            {
+                if ($astItem.Extent.StartOffset -ge $cursor)
+                {
+                    $found = $astItem; break
+                }
+            }
+            if ($null -eq $found)
+            {
+                $asts[0]
+            }
+            else
+            {
+                $found
+            }
+        }
+
+        $startOffsetAdjustment = 0
+        $endOffsetAdjustment = 0
+        if ($nextAst -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $nextAst.StringConstantType -ne [System.Management.Automation.Language.StringConstantType]::BareWord)
+        {
+            $startOffsetAdjustment = 1
+            $endOffsetAdjustment = 2
+        }
+
+        [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition($nextAst.Extent.StartOffset + $startOffsetAdjustment)
+        [Microsoft.PowerShell.PSConsoleReadLine]::SetMark($null, $null)
+        [Microsoft.PowerShell.PSConsoleReadLine]::SelectForwardChar($null, ($nextAst.Extent.EndOffset - $nextAst.Extent.StartOffset) - $endOffsetAdjustment)
+    }
+
+    Set-PSReadLineKeyHandler -Chord 'Alt+x' -BriefDescription ToUnicodeChar -LongDescription "Transform Unicode point" -ScriptBlock {
+        $buffer = $null; $cursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref] $buffer, [ref] $cursor)
+        if ($cursor -lt 4)
+        {
+            return
+        }
+        $number = 0
+        if ([int]::TryParse($buffer.Substring($cursor - 4, 4), [System.Globalization.NumberStyles]::AllowHexSpecifier, $null, [ref] $number))
+        {
+            try
+            {
+                $unicode = [char]::ConvertFromUtf32($number)
+            }
+            catch
+            {
+                return
+            }
+
+            [Microsoft.PowerShell.PSConsoleReadLine]::Delete($cursor - 4, 4)
+            [Microsoft.PowerShell.PSConsoleReadLine]::Insert($unicode)
+        }
+    }
+    Set-PSReadLineKeyHandler -Chord Shift+Enter -Function AddLine
+    Set-PSReadLineKeyHandler -Chord Ctrl+f -Function ForwardWord
+    Set-PSReadLineKeyHandler -Chord Enter -Function AcceptLine
 }
-Set-PSReadLineKeyHandler -Chord Shift+Enter -Function AddLine
-Set-PSReadLineKeyHandler -Chord Ctrl+f -Function ForwardWord
-Set-PSReadLineKeyHandler -Chord Enter -Function AcceptLine
 
 # --- Argument Completers ---
 Register-ArgumentCompleter -Native -CommandName 'git', 'npm', 'deno' -ScriptBlock {
@@ -741,17 +782,24 @@ function Get-GitWhoami
 }
 function gcom
 {
-    param([string]$Message) { if (Get-Command git -ErrorAction SilentlyContinue)
-        {
-            git add .; git commit -m $Message
-        } }
+    param([string]$Message)
+
+    if (Get-Command git -ErrorAction SilentlyContinue)
+    {
+        git add .
+        git commit -m $Message
+    }
 }
 function lazyg
 {
-    param([string]$Message) { if (Get-Command git -ErrorAction SilentlyContinue)
-        {
-            git add .; git commit -m $Message; git push
-        } }
+    param([string]$Message)
+
+    if (Get-Command git -ErrorAction SilentlyContinue)
+    {
+        git add .
+        git commit -m $Message
+        git push
+    }
 }
 Set-Alias open Open-Item
 Set-Alias edit $EDITOR
