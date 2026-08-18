@@ -411,6 +411,7 @@ $PSReadLineOptions = @{
         String             = $PSStyle.Foreground.Yellow
         Type               = $PSStyle.Foreground.Blue
         Variable           = $PSStyle.Foreground.Cyan
+        ListPrediction     = '#9800f2'
     }
     PredictionSource              = "HistoryAndPlugin"
     PredictionViewStyle           = "ListView"
@@ -466,53 +467,105 @@ if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue)
     Set-PSReadLineKeyHandler -Key UpArrow -Function HistorySearchBackward
     Set-PSReadLineKeyHandler -Key DownArrow -Function HistorySearchForward
 
-    if ($IsWindows -and (Get-Command Out-GridView -ErrorAction SilentlyContinue))
-    {
-        Set-PSReadLineKeyHandler -Key F7 -BriefDescription History -LongDescription 'Show command history' -ScriptBlock {
-            [string] $pattern = $null
-            [int]    $cursor = 0
-            [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$pattern, [ref]$cursor)
-            if ($pattern)
-            {
-                $pattern = [regex]::Escape($pattern)
-            }
+    Set-PSReadLineKeyHandler -Key F7 -BriefDescription History -LongDescription 'Show command history' -ScriptBlock {
+        [string] $pattern = $null
+        [int]    $cursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$pattern, [ref]$cursor)
+        if ($pattern)
+        {
+            $pattern = [regex]::Escape($pattern)
+        }
 
-            $history = [System.Collections.ArrayList]@(
-                $last = ''; $lines = ''
-                foreach ($line in [System.IO.File]::ReadLines((Get-PSReadLineOption).HistorySavePath))
+        $history = [System.Collections.ArrayList]@()
+        $historyPath = (Get-PSReadLineOption).HistorySavePath
+
+        if (Test-Path -LiteralPath $historyPath)
+        {
+            $last = ''; $lines = ''
+            foreach ($line in [System.IO.File]::ReadLines($historyPath))
+            {
+                if ($line.EndsWith('`'))
                 {
-                    if ($line.EndsWith('`'))
+                    $line = $line.Substring(0, $line.Length - 1)
+                    $lines = if ($lines)
                     {
-                        $line = $line.Substring(0, $line.Length - 1)
-                        $lines = if ($lines)
-                        {
-                            "$lines`n$line"
-                        }
-                        else
-                        {
-                            $line
-                        }
-                        continue
+                        "$lines`n$line"
                     }
-                    if ($lines)
+                    else
                     {
-                        $line = "$lines`n$line"; $lines = ''
+                        $line
                     }
-                    if (-not $pattern -or $line -match $pattern)
+                    continue
+                }
+                if ($lines)
+                {
+                    $line = "$lines`n$line"; $lines = ''
+                }
+                if (-not $pattern -or $line -match $pattern)
+                {
+                    if ($line -ne $last)
                     {
-                        if ($line -ne $last)
-                        {
-                            $history.Add($line) | Out-Null; $last = $line
-                        }
+                        $history.Add($line) | Out-Null; $last = $line
                     }
                 }
-            )
-            $selected = $history | Out-GridView -Title History -OutputMode Single
-            if ($null -ne $selected)
-            {
-                [Microsoft.PowerShell.PSConsoleReadLine]::DeleteLine()
-                [Microsoft.PowerShell.PSConsoleReadLine]::Insert($selected)
             }
+        }
+
+        if ($history.Count -eq 0)
+        {
+            return
+        }
+
+        $selected = $null
+
+        if ($IsWindows)
+        {
+            # Windows: use the graphical grid view if available
+            if (Get-Command Out-GridView -ErrorAction SilentlyContinue)
+            {
+                $selected = $history | Out-GridView -Title History -OutputMode Single
+            }
+        }
+        else
+        {
+            # Linux/macOS: try Out-ConsoleGridView (GraphicalTools' text-based picker),
+            # otherwise fall back to a plain numbered menu with zero dependencies
+            if (Get-Command Out-ConsoleGridView -ErrorAction SilentlyContinue)
+            {
+                $selected = $history | Out-ConsoleGridView -Title History -OutputMode Single
+            }
+            else
+            {
+                [Microsoft.PowerShell.PSConsoleReadLine]::RevertLine()
+                [Console]::WriteLine()
+
+                # Show most recent last, numbered oldest-to-newest for readability
+                $indexed = @()
+                for ($i = 0; $i -lt $history.Count; $i++)
+                {
+                    $indexed += [pscustomobject]@{ Index = $i + 1; Command = $history[$i] }
+                }
+
+                $indexed | Format-Table -AutoSize | Out-Host
+
+                $choice = Read-Host "Select a command number (Enter to cancel)"
+                if ($choice -match '^\d+$')
+                {
+                    $choiceIndex = [int]$choice - 1
+                    if ($choiceIndex -ge 0 -and $choiceIndex -lt $history.Count)
+                    {
+                        $selected = $history[$choiceIndex]
+                    }
+                }
+
+                [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()
+            }
+        }
+
+        if ($null -ne $selected)
+        {
+            [Microsoft.PowerShell.PSConsoleReadLine]::DeleteLine()
+            [Microsoft.PowerShell.PSConsoleReadLine]::Insert($selected)
         }
     }
 
