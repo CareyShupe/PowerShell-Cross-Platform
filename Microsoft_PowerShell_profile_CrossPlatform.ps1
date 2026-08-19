@@ -224,12 +224,18 @@ function Update-PowerShell
         Added a second Where-Object filter to verify commands exist before adding them to the array
         Removed redundant Get-Command check in the loop (already filtered)
         This is cleaner and won't try to execute commands that don't exist
+
+        NOTE ON THE 'brew' ENTRY: Homebrew migrated PowerShell from a cask to a formula
+        starting with the 7.6 release line. A machine that installed PowerShell before that
+        migration has the cask version on disk, and a plain `brew upgrade powershell` will
+        not touch it. Uninstalling a cask that isn't present is a harmless no-op, so this
+        command is safe to run unconditionally on every machine, cask-based or not.
     #>
     $packageManagers = @(
         @{ Name = 'winget'; OS = 'Windows'; Cmd = "winget upgrade 'Microsoft.PowerShell' --accept-source-agreements --accept-package-agreements -h" },
         @{ Name = 'choco'; OS = 'Windows'; Cmd = 'choco upgrade powershell-core -y' },
         @{ Name = 'scoop'; OS = 'Windows'; Cmd = 'scoop update powershell' },
-        @{ Name = 'brew'; OS = 'macOS'; Cmd = 'brew upgrade powershell' },
+        @{ Name = 'brew'; OS = 'macOS'; Cmd = 'brew uninstall --cask powershell 2>$null; brew install --formula powershell || brew upgrade powershell' },
         @{ Name = 'apt'; OS = 'Linux'; Cmd = 'sudo apt update && sudo apt install powershell -y' },
         @{ Name = 'dnf'; OS = 'Linux'; Cmd = 'sudo dnf install powershell -y' },
         @{ Name = 'pacman'; OS = 'Linux'; Cmd = 'sudo pacman -S powershell' },
@@ -242,28 +248,79 @@ function Update-PowerShell
         Get-Command $_.Name -ErrorAction SilentlyContinue
     }
 
+    if ($packageManagers.Count -eq 0)
+    {
+        Write-Error "No supported package manager found for this platform"
+        return $false
+    }
+
+    <#
+        IMPORTANT: package managers routinely exit 0 ("success") even when they installed
+        nothing — e.g. apt when its repo metadata hasn't caught up to the latest GitHub
+        release yet, or brew when a stale cask silently blocks the formula install.
+        Invoke-Expression does not throw on that either, since a nonzero/zero exit code
+        from a native command isn't a terminating PowerShell error.
+
+        So instead of trusting the exit path, we spawn the actual `pwsh` binary in a
+        fresh process after each attempt and read its real, on-disk version. This is the
+        only way to know an update genuinely landed, and it works identically across
+        every package manager on every OS.
+    #>
     $updated = $false
     foreach ($pmConfig in $packageManagers)
     {
         Write-Host "Attempting update with $($pmConfig.Name)..." -ForegroundColor Yellow
         try
         {
-            Invoke-Expression $pmConfig.Cmd -ErrorAction Stop
-            Write-Host "PowerShell updated successfully with $($pmConfig.Name)" -ForegroundColor Green
-            $updated = $true
-            break
+            Invoke-Expression $pmConfig.Cmd
         }
         catch
         {
-            Write-Warning "Failed to update with $($pmConfig.Name): $_"
+            Write-Warning "Command for $($pmConfig.Name) threw an error: $_"
+            continue
+        }
+
+        $installedVersion = $null
+        try
+        {
+            $versionOutput = & pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
+            if ($versionOutput)
+            {
+                $installedVersion = [Version]($versionOutput.Trim() -replace '-.*$')
+            }
+        }
+        catch
+        {
+            # Leave $installedVersion as $null; handled below.
+        }
+
+        if ($installedVersion -and $installedVersion -ge $latestVersion)
+        {
+            Write-Host "PowerShell updated successfully with $($pmConfig.Name) (confirmed v$installedVersion on disk)" -ForegroundColor Green
+            $updated = $true
+            break
+        }
+        else
+        {
+            $foundText = if ($installedVersion)
+            {
+                "v$installedVersion"
+            }
+            else
+            {
+                'unknown'
+            }
+            Write-Warning "$($pmConfig.Name) ran, but the on-disk version is still $foundText (target v$latestVersion). The package repo may be lagging behind GitHub, or a manual step is needed. Trying next option..."
             continue
         }
     }
 
     if (-not $updated)
     {
-        Write-Error "Could not find a suitable package manager to update PowerShell"
-        Write-Host "Available package managers: $($packageManagers.Name -join ', ')"
+        Write-Error "No package manager reached PowerShell v$latestVersion"
+        Write-Host "Attempted: $($packageManagers.Name -join ', ')" -ForegroundColor Yellow
+        Write-Host "If your OS's package repo hasn't published this version yet, download the installer directly from:" -ForegroundColor Yellow
+        Write-Host "https://github.com/PowerShell/PowerShell/releases/tag/v$latestVersion" -ForegroundColor Yellow
         return $false
     }
 
