@@ -29,6 +29,12 @@ Set-StrictMode -Version Latest
 
 $PSDefaultParameterValues['Out-File:Encoding'] = 'UTF-8'
 
+# Environment Detection
+$script:IsWindows = $PSVersionTable.Platform -eq 'Win32NT'
+$script:IsMacOS = $PSVersionTable.Platform -eq 'Unix' -and (uname) -eq 'Darwin'
+$script:IsLinux = $PSVersionTable.Platform -eq 'Unix' -and (uname) -ne 'Darwin'
+$script:IsInteractive = $Host.Name -notmatch 'Server|NonInteractive'
+
 # --- User-configurable switches ---
 # Auto-updating system packages (apt/dnf/pacman/zypper/winget/choco/scoop/brew) unattended
 # can hang on a sudo password prompt or surprise you with an upgrade you didn't ask for.
