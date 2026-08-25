@@ -851,6 +851,84 @@ if ($IsWindows)
     }
 }
 
+function Get-KeyBindingReport
+{
+    [CmdletBinding()]
+    param(
+        [switch]$IncludeUnbound,
+        [switch]$ShowOverridesOnly
+    )
+
+    $bindings = Get-PSReadLineKeyHandler -Bound:(!$IncludeUnbound) -Unbound:$IncludeUnbound
+
+    if (-not $ShowOverridesOnly)
+    {
+        $bindings | Sort-Object Key | Select-Object Key, Function, Description | Format-Table -AutoSize -Wrap
+        return
+    }
+
+    # Spin up a clean, un-profiled pwsh to get PSReadLine's untouched defaults,
+    # matching the EditMode you're actually using (Emacs/Vi have different baselines).
+    $pwshPath = (Get-Process -Id $PID).Path
+    $currentEditMode = (Get-PSReadLineOption).EditMode
+
+    $baselineJson = & $pwshPath -NoProfile -NoLogo -Command "
+        Set-PSReadLineOption -EditMode $currentEditMode
+        Get-PSReadLineKeyHandler | Select-Object Key, Function | ConvertTo-Json -Compress
+    "
+
+    try
+    {
+        $baseline = $baselineJson | ConvertFrom-Json
+    }
+    catch
+    {
+        Write-Warning "Could not establish a clean baseline for comparison."
+        return
+    }
+
+    $baselineMap = @{}
+    foreach ($item in $baseline)
+    {
+        $baselineMap[$item.Key] = $item.Function
+    }
+
+    $overrides = foreach ($binding in $bindings)
+    {
+        $defaultFunction = $baselineMap[$binding.Key]
+
+        if ($defaultFunction -and $binding.Function -and $defaultFunction -ne $binding.Function)
+        {
+            [PSCustomObject]@{
+                Key             = $binding.Key
+                DefaultFunction = $defaultFunction
+                CurrentFunction = $binding.Function
+                Description     = $binding.Description
+            }
+        }
+        elseif ($defaultFunction -and -not $binding.Function)
+        {
+            [PSCustomObject]@{
+                Key             = $binding.Key
+                DefaultFunction = $defaultFunction
+                CurrentFunction = '<custom ScriptBlock>'
+                Description     = $binding.Description
+            }
+        }
+    }
+
+    if ($overrides)
+    {
+        $overrides | Sort-Object Key | Format-Table -AutoSize -Wrap
+    }
+    else
+    {
+        Write-Host "No key bindings currently override a PSReadLine default." -ForegroundColor Green
+    }
+}
+
+Set-Alias keys Get-KeyBindingReport
+
 # --- Dynamic Editor Logic ---
 $editors = if ($IsWindows)
 {
