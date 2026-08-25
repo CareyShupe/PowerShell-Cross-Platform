@@ -27,6 +27,23 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
+# --- Formatting Colors (ANSI via $PSStyle, PS7+ only) ---
+# Only apply when the terminal actually supports ANSI and output isn't being
+# redirected to a file/pipe
+if ($Host.UI.SupportsVirtualTerminal -and -not [Console]::IsOutputRedirected)
+{
+    $PSStyle.Formatting.Error = $PSStyle.Foreground.Red
+    $PSStyle.Formatting.Warning = $PSStyle.Foreground.Yellow
+    $PSStyle.Formatting.Verbose = $PSStyle.Foreground.Cyan
+    $PSStyle.Formatting.Debug = $PSStyle.Foreground.Magenta
+}
+else
+{
+    # Otherwise fall back to plain text so logs and
+    # CI output stay clean instead of filling with escape codes.
+    $PSStyle.OutputRendering = 'PlainText'
+}
+
 $PSDefaultParameterValues['Out-File:Encoding'] = 'UTF-8'
 
 # --- User-configurable switches ---
@@ -34,6 +51,16 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'UTF-8'
 # can hang on a sudo password prompt or surprise you with an upgrade you didn't ask for.
 # Off by default. Flip to $true (or run `Update-PowerShell -Force` manually) to opt in.
 $Script:EnableAutoPackageUpdate = $false
+
+# Showing Write-Verbose/Write-Debug output by default is noisy — every module's
+# internal chatter shows up, not just yours. Off by default; flip to $true if
+# you want verbose/debug streams visible without passing -Verbose/-Debug each time.
+$Script:EnableVerboseDebugOutput = $false
+if ($Script:EnableVerboseDebugOutput)
+{
+    $VerbosePreference = 'Continue'
+    $DebugPreference = 'Continue'
+}
 
 # --- To check if or make PSGallery trusted ---
 if ((Get-Command Get-PSResourceRepository -ErrorAction SilentlyContinue) -and
