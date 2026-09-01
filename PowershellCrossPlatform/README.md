@@ -1,92 +1,56 @@
-# PowerShell Cross-Platform
+# PowerShellCrossPlatform
 
-A personal PowerShell 7+ profile designed to behave consistently across Windows, macOS, and Linux.
+A single PowerShell profile that runs cleanly on **both Windows and Linux (Lubuntu)** — no branching config files, no "works on my machine." One profile, detected and adapted at runtime.
 
-This project collects profile configuration, shell helpers, editor preferences, native command completions, and optional maintenance tasks into one cross-platform setup. It is intended for daily interactive terminal use while keeping startup resilient when optional tools are missing.
+Most PowerShell profiles on GitHub are Windows-only and quietly break the moment you try to reuse them on Linux (registry drives that don't exist, `Out-GridView` that isn't installed, hardcoded `C:\` paths). This one was built specifically to avoid that — every platform-specific piece is detected and swapped out automatically.
 
-## What It Includes
+## Features
 
-- Cross-platform PowerShell profile for PowerShell Core 7.2+
-- Windows registry drive mounting for `HKU`, `HKCR`, and `HKCC`
-- Optional module maintenance for common shell tooling
-- Optional PowerShell update helper with package manager support
-- PSReadLine color, history, prediction, and key binding configuration
-- Native completions for tools such as `git`, `npm`, `deno`, `dotnet`, and `winget`
-- Dynamic editor selection using the first available editor
-- Convenience aliases and helper functions for profile editing, reloads, Git identity, and directory listing
+- **True cross-platform support** — runtime detection via `$IsWindows` / `$IsMacOS` / `$IsLinux`, with platform-aware fallbacks for things that don't exist everywhere (e.g. registry drive mounting, admin/role checks, network connectivity checks)
+- **Custom PSReadLine key bindings** — including `Get-KeyBindingReport` (aliased `keys`), a utility that diffs your live key bindings against PSReadLine's defaults so you can see exactly what's been customized
+- **Cross-platform history picker** — a from-scratch fallback for the classic F7 history popup, using `Out-ConsoleGridView` where available and a console menu where it isn't (since `Out-GridView` is Windows-only)
+- **Conditional Vi mode** — automatically enables PSReadLine's Vi edit mode when `nvim`/`vim` is detected as your editor, otherwise stays in the default mode
+- **oh-my-posh prompt integration** — with a cross-platform `Join-Path` fix for theme paths
+- **Smarter Tab completion** — upgraded to `MenuComplete`
+- **Color-coded, CI-safe output** — custom `$PSStyle.Formatting` colors for Error/Warning/Verbose/Debug that automatically fall back to plain text when output is redirected or running in CI/logs
+- **Self-updating** — `Update-PowerShell` function with cross-platform package manager logic (winget on Windows, distro-aware package managers on Linux via `/etc/os-release`), plus `-Force` / `-Verbose` / `-WhatIf` support
+- **WSL-aware `Open-Item`** — detects and handles WSL paths correctly
+- **Opt-in verbose/debug switch** — `$Script:EnableVerboseDebugOutput` to flip on detailed output without touching the profile itself
 
-## Supported Platforms
+## Requirements
 
-- Windows
-- macOS
-- Linux
+- PowerShell 7+ (a PowerShell 5.1-compatible variant is also included for Windows-only legacy use)
+- [oh-my-posh](https://ohmyposh.dev/) (optional, for the prompt theme)
+- `PSReadLine` (bundled with modern PowerShell)
 
-PowerShell 7.2 or newer is required.
+## Installation
 
-## Optional Tools
+1. Clone the repo:
 
-The profile works without these tools, but it enables extra features when they are available:
+   ```powershell
+   git clone https://github.com/CareyShupe/PowerShellCrossPlatform.git
+   ```
 
-- `PSReadLine`
-- `Terminal-Icons`
-- `oh-my-posh`
-- `git`
-- `dotnet`
-- `winget`, `choco`, or `scoop` on Windows
-- `brew` on macOS
-- `apt`, `dnf`, `pacman`, or `zypper` on Linux
+2. Review the profile script and adjust any user-specific paths or preferences.
+3. Symlink or copy it to your PowerShell profile location:
 
-## Setup
+   ```powershell
+   # Find your profile path
+   $PROFILE
+   ```
 
-Copy or link the profile script to your PowerShell profile path:
+4. Restart your PowerShell session.
 
-```powershell
-$PROFILE
-```
+> Tip: if you use this profile across multiple machines, consider symlinking it from a synced folder (OneDrive, Syncthing, etc.) rather than copying it, so updates propagate automatically.
 
-Then reload your profile:
+## Why this exists
 
-```powershell
-. $PROFILE
-```
+This started as a review and rewrite of a Windows-only PowerShell profile — identifying every place it silently assumed Windows (registry drives, admin checks, hardcoded paths, package manager calls) and replacing each one with a cross-platform equivalent. What's here is the result of that rewrite plus ongoing refinement: real bugs found and fixed while actually using the profile day to day on both Windows and Lubuntu.
 
-You can also use the included helper after the profile is loaded:
+## License
 
-```powershell
-reload
-```
+MIT — see [LICENSE](LICENSE) for details.
 
-## Maintenance Behavior
+## Contributing
 
-Automatic package updates are disabled by default:
-
-```powershell
-$Script:EnableAutoPackageUpdate = $false
-```
-
-The profile can check for module and PowerShell updates during interactive sessions, but it avoids running those checks in non-interactive shells. Update checks are gated so they do not run every time a new shell opens.
-
-To manually check for and install a PowerShell update:
-
-```powershell
-Update-PowerShell -Force
-```
-
-## Useful Commands
-
-| Command | Purpose |
-| --- | --- |
-| `ep` | Open the current PowerShell profile in your preferred editor |
-| `reload` | Reload the current profile |
-| `GWhoami` | Show configured Git author name and email |
-| `open` | Open a file or folder with the platform default application |
-| `ll` | Detailed directory listing |
-| `la` | Name-only directory listing |
-| `lh` | Wide directory listing |
-| `lv` | List-format directory listing |
-| `gcom "message"` | Run `git add .` and commit with the message |
-| `lazyg "message"` | Run `git add .`, commit, and push |
-
-## Notes
-
-This profile is optimized for interactive use. Optional integrations are guarded so missing modules or commands should not prevent a shell from opening.
+Issues and PRs welcome, especially if you hit a platform-specific edge case this doesn't handle yet.
